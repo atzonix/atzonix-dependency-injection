@@ -87,6 +87,9 @@ jobs:
     name: Publish to nuget.org
     needs: pack
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for GitHub OIDC token issuance
+      contents: read
     # Publish only on a pushed v* tag, or a manual dispatch with dry_run explicitly disabled.
     # Plain push/PR to main never reaches this job.
     if: >-
@@ -104,9 +107,15 @@ jobs:
           name: nuget-package
           path: artifacts
 
+      - name: NuGet login (OIDC → short-lived API key)
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: atzonix   # nuget.org profile name (Package Owner)
+
       - name: Push to nuget.org
         run: >-
           dotnet nuget push "artifacts/*.nupkg"
-          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
