@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    tags:     [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Pack only, do not push to nuget.org'
+        type: boolean
+        default: true
+
+env:
+  SOLUTION: atzonix-dependencyinjection.sln
+  PROJECT: src/Atzonix.DependencyInjection/Atzonix.DependencyInjection.csproj
+  DOTNET_NOLOGO: 'true'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 'true'
+
+jobs:
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore "$SOLUTION"
+
+      - name: Build
+        run: dotnet build "$SOLUTION" -c Release --no-restore
+
+      - name: Test
+        run: dotnet test "$SOLUTION" -c Release --no-build
+
+  pack:
+    name: Pack
+    needs: build-test
+    runs-on: ubuntu-latest
+    outputs:
+      pkg_version: ${{ steps.version.outputs.pkg_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Determine version from tag
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/v}"
+            echo "pkg_version=$version" >> "$GITHUB_OUTPUT"
+            echo "Packing tag-driven version: $version"
+          else
+            echo "pkg_version=" >> "$GITHUB_OUTPUT"
+            echo "No version tag; using <Version> from the csproj."
+          fi
+
+      - name: Pack
+        run: |
+          args=( "$PROJECT" -c Release -o artifacts -p:ContinuousIntegrationBuild=true )
+          if [[ -n "${{ steps.version.outputs.pkg_version }}" ]]; then
+            args+=( -p:Version="${{ steps.version.outputs.pkg_version }}" )
+          fi
+          dotnet pack "${args[@]}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: |
+            artifacts/*.nupkg
+            artifacts/*.snupkg
+          if-no-files-found: error
+
+  publish:
+    name: Publish to nuget.org
+    needs: pack
+    runs-on: ubuntu-latest
+    # Publish only on a pushed v* tag, or a manual dispatch with dry_run explicitly disabled.
+    # Plain push/PR to main never reaches this job.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false')
+    steps:
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: nuget-package
+          path: artifacts
+
+      - name: Push to nuget.org
+        run: >-
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
